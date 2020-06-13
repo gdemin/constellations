@@ -1,0 +1,86 @@
+---
+title: "Созвездия"
+author: "Григорий Демин"
+date: "2020 06 13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Постановка задачи
+
+Задача возникла из разговора в группе по [R (язык программирования)](https://t.me/rlang_ru):
+
+![](screen_1.png)
+
+Для ответа на вопрос нам нужен набор данных с координатами звезд на небе и меткой созвездия, к которому принадлежит звезда. Эта информация берется из репозитория с исходным кодом для программы [Stellarium](https://github.com/Stellarium/stellarium/tree/master/skycultures/western_SnT). По этим данным мы проверим, какой из методов кластерного анализа дает результаты, похожие на оригинальные греческие созвездия.
+
+### Исходные данные
+
+Сначала загрузим необходимые пакеты.
+
+```{r message=FALSE}
+library(maditr)
+library(ggplot2)
+
+```
+Скачаем данные из репозитория Stellarium:
+```{r echo=FALSE}
+CONSTELLATIONS = "data/constellations.txt"
+CONSTELLATION_NAMES = "data/constellation_names.txt"
+
+# файл с координатами звезд
+if(!file.exists(CONSTELLATIONS)){
+    download.file("https://raw.githubusercontent.com/Stellarium/stellarium/master/skycultures/western_SnT/SnT_constellations.txt", CONSTELLATIONS)
+}
+# файл с расшифровкой названий созвездий
+if(!file.exists(CONSTELLATION_NAMES)){
+    download.file("https://raw.githubusercontent.com/Stellarium/stellarium/master/skycultures/western_SnT/constellation_names.eng.fab", CONSTELLATION_NAMES)
+}
+
+```
+Загрузка полных названий созвездий.
+```{r}
+
+constellations_names = fread(CONSTELLATION_NAMES, sep = "", header = FALSE) %>% 
+    let(
+        V1 = trimws(gsub("_.+$", "", V1))
+    )
+constellations_names = strsplit(constellations_names$V1, "\t") %>% 
+    to_df() %>% 
+    setnames(c("abbr", "constellation"))
+
+
+```
+
+Данные в файле с координатами содержатся в позиционном формате, поэтому загрузка данных не совсем прямолинейна. Описание:
+
+```
+1-5   visual magnitude of star
+6     <blank>
+7-14  RA (hours and decimals, J2000.0)*
+15    <blank>
+16-23 North polar distance (deg. and dec. J2000.0)*
+24    <blank>
+25-28 Bayer Greek letter, maybe with superscript
+29    code for line weight*
+30-32 constellation*
+```
+
+```{r}
+constellations = fread(CONSTELLATIONS, sep = "", header = FALSE, strip.white = FALSE) %>% 
+    take_if(!startsWith(V1, "#"),
+            magnitude = as.numeric(substr(V1, 1, 5)), 
+            ra = as.numeric(substr(V1, 7, 14)), 
+            npd = as.numeric(substr(V1, 16, 23)), 
+            const_abbr = substr(V1, 30, 32) 
+    ) %>% 
+    dt_left_join(constellations_names, by = c(const_abbr = "abbr"))
+
+
+head(constellations)
+summary(constellations)
+```
+
