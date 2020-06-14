@@ -29,7 +29,7 @@ library(cluster) # для k-medoid
 library(akmeans) # для k-means с косинусной метрикой
 ```
 Скачаем данные из репозитория Stellarium:
-```{r echo=FALSE}
+```{r }
 CONSTELLATIONS = "data/constellations.txt"
 CONSTELLATION_NAMES = "data/constellation_names.txt"
 
@@ -102,12 +102,13 @@ n_const = uniqueN(constellations$constellation)
 ```
 
 Всего у нас `r n_const` созвездия. Это число нам понадобится, когда мы будем делать кластерный анализ.
-Нарисуем импровизированную карту звездного неба. Каждый цвет обозначает свое созвездие. Визуализация так себе на самом деле.
+Нарисуем импровизированную карту звездного неба. Каждый цвет обозначает свое созвездие.
 
 ```{r}
 ggplot(constellations) + 
     geom_point(aes(x = ra, y = npd, alpha = magnitude + 2), color = "orange") +
-    geom_point(aes(x = ra, y = npd, color = constellation), size = 12, alpha = .3) +
+    geom_point(aes(x = ra, y = npd, color = constellation), size = 4, alpha = .3) +
+    geom_path(aes(x = ra, y = npd, group = constellation)) +
     theme_minimal() +
     theme(legend.position="none")
 ```
@@ -150,6 +151,11 @@ match_clusters = function(target, predicted){
         query(matches)
 }
 
+is_correct = function(target, matched){
+    # возвращает TRUE для правильно восстановленного target
+    # FALSE для прочих. 
+    !is.na(matched) & matched == target
+}
 ```
 
 Делаем три кластерных анализа с разным типом дистанции. 
@@ -158,49 +164,60 @@ set.seed(123)
 constellations = constellations %>% 
     let(
         random_baseline = sample(constellation), # будем сравнивать со случайным угадыванием
-        res_random_baseline = random_baseline == constellation,
+        res_random_baseline = is_correct(constellation, random_baseline),
+        constant_baseline = "Hercules", # самое большое созвездие
+        res_constant_baseline = is_correct(constellation, constant_baseline),
         # евклидово расстояние
         k_euclid = kmeans(cbind(ra, npd), centers = n_const)$cluster,
         const_euclid = match_clusters(constellation, k_euclid),
-        res_euclid = !is.na(const_euclid) & const_euclid == constellation,
+        res_euclid = is_correct(constellation, const_euclid),
         # k-medoids
         k_medoid = pam(cbind(ra, npd), k = n_const, cluster.only=TRUE),
         # k_medoid = fastkmed(dist(cbind(ra, npd)), ncluster = n_const)$cluster,
         const_medoid = match_clusters(constellation, k_medoid),
-        res_medoid = !is.na(const_medoid) & const_medoid == constellation,
+        res_medoid = is_correct(constellation, const_medoid),
         # k-means с косинусом
         k_cosine = norm.sim.ksc(cbind(ra, npd), k = n_const)$cluster,
         const_cosine = match_clusters(constellation, k_cosine),
-        res_cosine = !is.na(const_cosine) & const_cosine == constellation,
+        res_cosine = is_correct(constellation, const_cosine),
         # все то же самое, но со стандартизацией
         # евклидово расстояние
-        k_euclid = kmeans(scale(cbind(ra, npd)), centers = n_const)$cluster,
-        const_euclid = match_clusters(constellation, k_euclid),
-        res_scaled_euclid = !is.na(const_euclid) & const_euclid == constellation,
+        k_scaled_euclid = kmeans(scale(cbind(ra, npd)), centers = n_const)$cluster,
+        const_scaled_euclid = match_clusters(constellation, k_scaled_euclid),
+        res_scaled_euclid = is_correct(constellation, const_scaled_euclid),
         # k-medoids
-        k_medoid = pam(scale(cbind(ra, npd)), k = n_const, cluster.only=TRUE),
-        # k_medoid = fastkmed(dist(cbind(ra, npd)), ncluster = n_const)$cluster,
-        const_medoid = match_clusters(constellation, k_medoid),
-        res_scaled_medoid = !is.na(const_medoid) & const_medoid == constellation,
+        k_scaled_medoid = pam(scale(cbind(ra, npd)), k = n_const, cluster.only=TRUE),
+        # k_scaled_medoid = fastkmed(dist(cbind(ra, npd)), ncluster = n_const)$cluster,
+        const_scaled_medoid = match_clusters(constellation, k_scaled_medoid),
+        res_scaled_medoid = is_correct(constellation, const_scaled_medoid),
         # k-means с косинусом
-        k_cosine = norm.sim.ksc(scale(cbind(ra, npd)), k = n_const)$cluster,
-        const_cosine = match_clusters(constellation, k_cosine),
-        res_scaled_cosine = !is.na(const_cosine) & const_cosine == constellation
-    ) %>% 
-    take_all(if(!startsWith(.name, "const_") & !startsWith(.name, "k_")) .x)
+        k_scaled_cosine = norm.sim.ksc(scale(cbind(ra, npd)), k = n_const)$cluster,
+        const_scaled_cosine = match_clusters(constellation, k_scaled_cosine),
+        res_scaled_cosine = is_correct(constellation, const_scaled_cosine)
+    )
 
 
 ```
 
-Подводим итоги. В таблиц accuracy в процентах:
+Подводим итоги. Выведем таблицу с accuracy в процентах:
 ```{r}
-result = take_all(constellations, if(startsWith(.name, "res_")) round(mean(.x)*100,1))
-knitr::kable(result)
+result = take_all(constellations, if(startsWith(.name, "res_")) round(mean(.x)*100,1)) 
+knitr::kable(t(result), col.names = c( "Accuracy, %"))
+```
+
+Отрисуем картинку - черным закрашены звезды с правильно восстановленным названием созвездия:
+```{r}
+ggplot(constellations) + 
+    geom_point(aes(x = ra, y = npd, color = ifelse(res_scaled_medoid, "correct", "error")), size = 4, alpha = .5) +
+    scale_color_manual(values = c("correct" = "black", "error" = "orange")) +
+    geom_path(aes(x = ra, y = npd, group = constellation)) +
+    theme_minimal() +
+    theme(legend.position="none")
 ```
 
 #### Выводы
 
-Наилучшую точность обеспечивает метод k-medoid по стандартизированным данным: `r result$res_scaled_medoid`. Практически такую же точность дает евклидово расстояние. Косинусная мера сходства сильно отстает. Однако все они значительно превосходят случайное угадывание.
+Наилучшую точность обеспечивает метод k-medoid по стандартизированным данным: `r result$res_scaled_medoid` процентов. Практически такую же точность дает евклидово расстояние. Косинусная мера сходства сильно отстает. Однако все они значительно превосходят случайное угадывание.
 
 Все это не очень помогает ответить на вопрос от booking.com. Можно использовать любой из трех методов кластеризации, они все дают результат, далекий от случайного. Но этот результат не идеально точный, поэтому возожно, что правильный ответ "Ничего из перечисленного".
 
