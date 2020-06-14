@@ -24,7 +24,9 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r message=FALSE}
 library(maditr)
 library(ggplot2)
-
+library(cluster) # для k-medoid
+# library(kmed) # для k-medoid, но pam из пакета cluster работает лучше
+library(akmeans) # для k-means с косинусной метрикой
 ```
 Скачаем данные из репозитория Stellarium:
 ```{r echo=FALSE}
@@ -41,18 +43,20 @@ if(!file.exists(CONSTELLATION_NAMES)){
 }
 
 ```
-Загрузка полных названий созвездий.
+Загрузка полных названий созвездий:
 ```{r}
 
 constellations_names = fread(CONSTELLATION_NAMES, sep = "", header = FALSE) %>% 
     let(
-        V1 = trimws(gsub("_.+$", "", V1))
+        V1 = trimws(gsub("_.+$", "", V1)),
+        V1 = gsub('"', "", V1)
     )
+
 constellations_names = strsplit(constellations_names$V1, "\t") %>% 
     to_df() %>% 
     setnames(c("abbr", "constellation"))
 
-
+head(constellations_names)
 ```
 
 Данные в файле с координатами содержатся в позиционном формате, поэтому загрузка данных не совсем прямолинейна. Описание:
@@ -77,10 +81,129 @@ constellations = fread(CONSTELLATIONS, sep = "", header = FALSE, strip.white = F
             npd = as.numeric(substr(V1, 16, 23)), 
             const_abbr = substr(V1, 30, 32) 
     ) %>% 
-    dt_left_join(constellations_names, by = c(const_abbr = "abbr"))
+    dt_left_join(constellations_names, by = c(const_abbr = "abbr")) %>% 
+    na.omit() # у нас несколько пропусков, удаляем их
 
 
 head(constellations)
 summary(constellations)
 ```
 
+#### Разведочный анализ
+
+Список всех созвездий:
+```{r}
+dt_count(constellations, constellation, sort = TRUE)
+
+# количество созвездий
+n_const = uniqueN(constellations$constellation)
+
+
+```
+
+Всего у нас `r n_const` созвездия. Это число нам понадобится, когда мы будем делать кластерный анализ.
+Нарисуем импровизированную карту звездного неба. Каждый цвет обозначает свое созвездие. Визуализация так себе на самом деле.
+
+```{r}
+ggplot(constellations) + 
+    geom_point(aes(x = ra, y = npd, alpha = magnitude + 2), color = "orange") +
+    geom_point(aes(x = ra, y = npd, color = constellation), size = 12, alpha = .3) +
+    theme_minimal() +
+    theme(legend.position="none")
+```
+
+#### Кластеризация
+
+Так как кластерный анализ не знает реальных названий созвездий, то нам нужна функция, которая будет сопоставлять номер кластера с созвездием. Она должна делать это таким образом, чтобы максимизировать итоговую accuracy. Мы считаем, что сопоставление должно быть один к одному. Алгоритм такой:
+
+1. Подсчитываем, сколько звезд попало в данное пересечение "созвездие - кластер" для каждой пары
+2. Сортируем пары по убыванию
+3. Идем сверху вниз и берем соотвествие с максимальным количеством звезд. Повторно использовать созвездие или номер кластера нельзя.
+
+Надо обратить внимание, что в таком подходе некоторые кластеры совсем не попадут в цель.
+
+```{r}
+match_clusters = function(target, predicted){
+    # функция возвращает вектор с проставленными предсказанными созвездиями
+    # там, где созвездие предсказнно неверно, будет NA
+    # данный вектор должен максимизировать accuracy
+    dt = data.table(target, predicted)
+    res =  dt %>% 
+        take(n = .N, by = .(target, predicted)) %>% 
+        sort_by(-n)  
+
+    all_targets = unique(res$target)
+    used_clusters = c()
+    for(each_target in all_targets){
+        curr_target = query(res, target == each_target & !(predicted %in% used_clusters))
+        curr_pred = which.max(res$n[curr_target])[1]
+        curr_match = res$predicted[curr_target][curr_pred]
+        used_clusters = c(used_clusters, curr_match)
+    }
+    to_join = na.omit(data.table(predicted = used_clusters, matches = all_targets))
+    (anyDuplicated(to_join$predicted) || anyDuplicated(to_join$matches)) && stop("Что-то пошло не так")
+    
+    dt_left_join(dt,
+                 to_join,
+                 by = "predicted"
+                 ) %>% 
+        query(matches)
+}
+
+```
+
+Делаем три кластерных анализа с разным типом дистанции. 
+```{r}
+set.seed(123)
+constellations = constellations %>% 
+    let(
+        random_baseline = sample(constellation), # будем сравнивать со случайным угадыванием
+        res_random_baseline = random_baseline == constellation,
+        # евклидово расстояние
+        k_euclid = kmeans(cbind(ra, npd), centers = n_const)$cluster,
+        const_euclid = match_clusters(constellation, k_euclid),
+        res_euclid = !is.na(const_euclid) & const_euclid == constellation,
+        # k-medoids
+        k_medoid = pam(cbind(ra, npd), k = n_const, cluster.only=TRUE),
+        # k_medoid = fastkmed(dist(cbind(ra, npd)), ncluster = n_const)$cluster,
+        const_medoid = match_clusters(constellation, k_medoid),
+        res_medoid = !is.na(const_medoid) & const_medoid == constellation,
+        # k-means с косинусом
+        k_cosine = norm.sim.ksc(cbind(ra, npd), k = n_const)$cluster,
+        const_cosine = match_clusters(constellation, k_cosine),
+        res_cosine = !is.na(const_cosine) & const_cosine == constellation,
+        # все то же самое, но со стандартизацией
+        # евклидово расстояние
+        k_euclid = kmeans(scale(cbind(ra, npd)), centers = n_const)$cluster,
+        const_euclid = match_clusters(constellation, k_euclid),
+        res_scaled_euclid = !is.na(const_euclid) & const_euclid == constellation,
+        # k-medoids
+        k_medoid = pam(scale(cbind(ra, npd)), k = n_const, cluster.only=TRUE),
+        # k_medoid = fastkmed(dist(cbind(ra, npd)), ncluster = n_const)$cluster,
+        const_medoid = match_clusters(constellation, k_medoid),
+        res_scaled_medoid = !is.na(const_medoid) & const_medoid == constellation,
+        # k-means с косинусом
+        k_cosine = norm.sim.ksc(scale(cbind(ra, npd)), k = n_const)$cluster,
+        const_cosine = match_clusters(constellation, k_cosine),
+        res_scaled_cosine = !is.na(const_cosine) & const_cosine == constellation
+    ) %>% 
+    take_all(if(!startsWith(.name, "const_") & !startsWith(.name, "k_")) .x)
+
+
+```
+
+Подводим итоги. В таблиц accuracy в процентах:
+```{r}
+result = take_all(constellations, if(startsWith(.name, "res_")) round(mean(.x)*100,1))
+knitr::kable(result)
+```
+
+#### Выводы
+
+Наилучшую точность обеспечивает метод k-medoid по стандартизированным данным: `r result$res_scaled_medoid`. Практически такую же точность дает евклидово расстояние. Косинусная мера сходства сильно отстает. Однако все они значительно превосходят случайное угадывание.
+
+Все это не очень помогает ответить на вопрос от booking.com. Можно использовать любой из трех методов кластеризации, они все дают результат, далекий от случайного. Но этот результат не идеально точный, поэтому возожно, что правильный ответ "Ничего из перечисленного".
+
+В дальнейших изысканиях можно попытаться получить угловые расстояния между звездами для наблюдателя с Земли и использовать их для кластеризации. Так же могут хорошо сработать методы кластеризации на графах. Однако все это пусть останется для будущих исследователей.
+
+Github с исходным кодом и данными: [Constellations](https://github.com/gdemin/constellations)
